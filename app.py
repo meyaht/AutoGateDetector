@@ -110,9 +110,13 @@ st.dataframe(
     height=300,
 )
 
-# Download
+# Downloads
+col_csv, col_json = st.columns([1, 1])
 csv_bytes = df_filt[display_cols].to_csv(index=False).encode()
-st.download_button("Download CSV", csv_bytes, "gates_filtered.csv", "text/csv")
+col_csv.download_button("Download CSV", csv_bytes, "gates_filtered.csv", "text/csv")
+
+with open(GATES_JSON, "rb") as _f:
+    col_json.download_button("Download gates.json", _f.read(), "gates.json", "application/json")
 
 # ------------------------------------------------------------------
 # 3D scatter of gate centres
