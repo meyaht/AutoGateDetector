@@ -770,7 +770,7 @@ def run_pipeline(
 
             gates, debug_str = detect_gates(
                 uv, axis=scan_axis, position_m=float(pos), thickness_m=thickness_m,
-                pts3d=pts_z,
+                pts3d=pts_z, verbose=False,
             )
             pipe_circles = detect_pipe_circles(uv)
 
@@ -792,11 +792,7 @@ def run_pipeline(
                 if gates:
                     axis_gate_count += len(gates)
                     sys.stdout.write(f"\n[pipeline]   {scan_axis}={pos:.1f}m → "
-                                     f"{len(gates)} gates, {len(pipe_circles)} pipe(s)"
-                                     f" ({debug_str})\n")
-                elif pipe_circles:
-                    sys.stdout.write(f"\n[pipeline]   {scan_axis}={pos:.1f}m → "
-                                     f"{len(pipe_circles)} pipe(s) (no gates)\n")
+                                     f"{len(gates)} gates, {len(pipe_circles)} pipe(s)\n")
                 axis_pipe_count += len(pipe_circles)
                 img_fname = _save_slice_image(uv, gates, pipe_circles, float(pos),
                                               scan_axis, u_label, v_label, run_dir,
