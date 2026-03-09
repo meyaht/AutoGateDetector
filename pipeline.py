@@ -30,7 +30,7 @@ if str(_GATEDETECTOR) not in sys.path:
     sys.path.insert(0, str(_GATEDETECTOR))
 
 import numpy as np
-from gatedetector.detect import detect_gates, detect_pipe_circles
+from gatedetector.detect import detect_gates, detect_pipe_circles, Gate
 from gatedetector.slab import extract_slab, cloud_bounds
 
 
@@ -522,6 +522,156 @@ def _save_plan_image(pts_z: np.ndarray, all_gates: list, run_dir: Path,
     return fname
 
 
+def _propagate_pipe_detections(
+    all_pipe_detections: list,
+    all_gates: list,
+    pts_z: np.ndarray,
+    step_m: float,
+    thickness_m: float,
+    run_dir: Path,
+    plan_thumb: dict,
+) -> list:
+    """After the main scan, search for each detected pipe in the adjacent slices.
+
+    A real pipe is a continuous object — if it appears at position P it almost
+    certainly appears at P±step too.  For every known circle centre, extract a
+    tight window of points from the neighbouring slab and try to fit a circle
+    with relaxed thresholds (we have a strong spatial prior).  Any match is
+    merged into that slice's record and the image is re-rendered.
+
+    Returns the updated all_pipe_detections list (may contain new entries for
+    previously empty adjacent slices).
+    """
+    if not all_pipe_detections:
+        return all_pipe_detections
+
+    print(f"\n[pipeline] ── Pipe propagation pass ──────────────────────────", flush=True)
+
+    _rnd = lambda p: round(float(p), 6)
+
+    # Build lookups keyed by (axis, pos)
+    pos_circles  = {}   # (axis, pos) → current circle list
+    pos_det_idx  = {}   # (axis, pos) → index in all_pipe_detections
+    for i, det in enumerate(all_pipe_detections):
+        key = (det["axis"], _rnd(det["position_m"]))
+        pos_circles[key] = list(det["circles"])
+        pos_det_idx[key] = i
+
+    gate_map = {}       # (axis, pos) → list of gate dicts
+    for g in all_gates:
+        if g.get("gate_id") == "_CLOUD_META_":
+            continue
+        key = (g.get("axis", "Y"), _rnd(g.get("position_m", 0)))
+        gate_map.setdefault(key, []).append(g)
+
+    # ── Search pass ─────────────────────────────────────────────────────────
+    # Cache slab extractions so each adjacent position is only extracted once.
+    uv_cache  = {}   # (axis, adj_pos) → (uv, u_label, v_label) | None
+    additions = {}   # (axis, adj_pos) → list of newly-found circles
+
+    for det in all_pipe_detections:
+        axis   = det["axis"]
+        pos    = det["position_m"]
+        known  = det["circles"]
+        if not known:
+            continue
+
+        for direction in (-1, 1):
+            adj_pos = _rnd(pos + direction * step_m)
+            adj_key = (axis, adj_pos)
+
+            if adj_key not in uv_cache:
+                _, uv_adj, u_lbl, v_lbl = extract_slab(
+                    pts_z, axis=axis, position_m=adj_pos, thickness_m=thickness_m,
+                )
+                uv_cache[adj_key] = (
+                    (uv_adj, u_lbl, v_lbl)
+                    if (uv_adj is not None and len(uv_adj) >= 10)
+                    else None
+                )
+
+            cached = uv_cache[adj_key]
+            if cached is None:
+                continue
+            uv_adj = cached[0]
+
+            existing = pos_circles.get(adj_key, [])
+            pending  = additions.get(adj_key, [])
+
+            for pc in known:
+                u_c, v_c, r_c = pc["u_m"], pc["v_m"], pc["radius_m"]
+
+                # Skip if a circle is already close to this centre in the adj slice
+                if any(
+                    abs(e["u_m"] - u_c) < 0.15 and abs(e["v_m"] - v_c) < 0.15
+                    for e in existing + pending
+                ):
+                    continue
+
+                # Extract a tight window around the expected circle centre
+                sr = r_c + 0.20   # radius + 200 mm margin
+                mask = (
+                    (uv_adj[:, 0] >= u_c - sr) & (uv_adj[:, 0] <= u_c + sr) &
+                    (uv_adj[:, 1] >= v_c - sr) & (uv_adj[:, 1] <= v_c + sr)
+                )
+                nearby = uv_adj[mask]
+                if len(nearby) < 6:
+                    continue
+
+                # Relax thresholds — spatial prior justifies a lower bar
+                candidates = detect_pipe_circles(
+                    nearby, min_inlier_frac=0.40, min_arc_deg=120.0,
+                )
+                for fc in candidates:
+                    if abs(fc["u_m"] - u_c) < 0.15 and abs(fc["v_m"] - v_c) < 0.15:
+                        additions.setdefault(adj_key, []).append(fc)
+                        break   # one match per known pipe
+
+    if not additions:
+        print(f"[pipeline] Propagation: no new circles found.", flush=True)
+        return all_pipe_detections
+
+    total_new = sum(len(v) for v in additions.values())
+    print(f"[pipeline] Propagation: {total_new} new pipe circle(s) across "
+          f"{len(additions)} slice(s).", flush=True)
+
+    # ── Apply pass: merge and re-render ─────────────────────────────────────
+    updated = list(all_pipe_detections)
+
+    for adj_key, new_circles in sorted(additions.items()):
+        axis, adj_pos = adj_key
+        cached = uv_cache.get(adj_key)
+        if cached is None:
+            continue
+        uv_adj, u_lbl, v_lbl = cached
+
+        gate_objs  = [Gate.from_dict(g) for g in gate_map.get(adj_key, [])]
+        all_circles = pos_circles.get(adj_key, []) + new_circles
+
+        img_fname = _save_slice_image(
+            uv_adj, gate_objs, all_circles, adj_pos,
+            axis, u_lbl, v_lbl, run_dir, plan_thumb=plan_thumb,
+        )
+        print(f"[pipeline]   {axis}={adj_pos:.2f}m  +{len(new_circles)} propagated pipe(s)"
+              f"  → {img_fname}", flush=True)
+
+        if adj_key in pos_det_idx:
+            i = pos_det_idx[adj_key]
+            rec = dict(updated[i])
+            rec["circles"]     = all_circles
+            rec["slice_image"] = img_fname
+            updated[i] = rec
+        else:
+            updated.append({
+                "axis":        axis,
+                "position_m":  adj_pos,
+                "slice_image": img_fname,
+                "circles":     all_circles,
+            })
+
+    return updated
+
+
 def run_pipeline(
     cloud_path: str,
     axis: str = "auto",
@@ -636,6 +786,11 @@ def run_pipeline(
 
     elapsed = time.time() - t_start
     print(f"[pipeline] Done — {len(all_gates)} gates total in {elapsed:.0f}s", flush=True)
+
+    # Propagation pass: find missed pipes in adjacent slices
+    all_pipe_detections = _propagate_pipe_detections(
+        all_pipe_detections, all_gates, pts_z, step_m, thickness_m, run_dir, plan_thumb,
+    )
 
     # Generate plan view image
     plan_fname = _save_plan_image(pts_z, all_gates, run_dir)
