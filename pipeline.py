@@ -3,7 +3,7 @@
 Usage:
     python pipeline.py <cloud.npy> [options]
 
-    --axis X|Y|auto Slice axis — auto detects via longest-run (default: auto)
+    --axis X|Y|auto Slice axis — auto detects angle, rotates cloud, scans perp (default: auto)
     --step 1.0      Step between slices in metres (default: 1.0)
     --thickness 0.3 Slab thickness in metres (default: 0.3)
     --zmin 0.0      Min Z to keep (default: 0.0)
@@ -34,13 +34,19 @@ from gatedetector.detect import detect_gates
 from gatedetector.slab import extract_slab, cloud_bounds
 
 
-def detect_primary_axis(pts: np.ndarray) -> str:
-    """Find primary rack axis (X or Y) using longest-run detection.
+def detect_and_align(pts: np.ndarray) -> tuple:
+    """Detect primary rack direction via longest-run, rotate cloud to align it to
+    the nearest cardinal axis, and return the aligned cloud + metadata.
 
-    Projects XY points at angles 0–179° in 1° steps, bins at 0.5 m, and finds
-    the angle with the longest consecutive run of occupied bins. That angle is
-    the rack's structural direction. Returns 'X' if the rack runs along X
-    (scan slices perpendicular = along Y) or 'Y' if it runs along Y.
+    Scans angles 0–179° in 1° steps. For each angle, projects XY points onto
+    that direction, bins at 0.5 m, and counts the longest consecutive run of
+    occupied bins. The angle with the longest run is the rack's structural
+    direction. We snap to the nearest 90° multiple and rotate the cloud by the
+    small residual so slices are truly perpendicular to the structural members.
+
+    Returns (aligned_pts, rot_deg, [cx, cy], scan_axis) where rot_deg is the
+    rotation applied (stored as plan_rotation so GateDetector can display
+    the cloud in the same orientation).
     """
     n = min(200_000, len(pts))
     rng = np.random.default_rng(42)
@@ -69,14 +75,30 @@ def detect_primary_axis(pts: np.ndarray) -> str:
             best_run = longest
             best_deg = deg
 
-    # best_deg is the rack's long-axis direction.
-    # Scan slices must be perpendicular to the rack → slice axis is 90° from best_deg.
-    # If rack runs ~0° or ~180° (along X), slice along Y. If ~90° (along Y), slice along X.
-    perp_deg = (best_deg + 90) % 180
-    axis = "X" if perp_deg >= 45 and perp_deg < 135 else "Y"
-    print(f"[pipeline] Longest-run axis detection: rack direction={best_deg}°, "
-          f"scan axis={axis}  (run={best_run} bins × {bin_m}m)", flush=True)
-    return axis
+    snap_deg = round(best_deg / 90) * 90
+    rot_deg  = float(snap_deg - best_deg)   # rotation to apply to align rack to cardinal
+
+    print(f"[pipeline] Axis detection: rack direction={best_deg}°, "
+          f"snap={snap_deg}°, rotating by {rot_deg:+.1f}°  "
+          f"(run={best_run} bins × {bin_m}m)", flush=True)
+
+    # Rotate entire cloud around its XY centroid
+    r = np.deg2rad(rot_deg)
+    rc, rs = float(np.cos(r)), float(np.sin(r))
+    cx, cy = float(c[0]), float(c[1])
+    aligned = pts.copy()
+    dx = pts[:, 0] - cx
+    dy = pts[:, 1] - cy
+    aligned[:, 0] = dx * rc - dy * rs + cx
+    aligned[:, 1] = dx * rs + dy * rc + cy
+
+    # After rotation, rack aligns to snap_deg.
+    # Scan axis is perpendicular to the rack:
+    #   snap=0°  → rack runs along X → scan slices along Y
+    #   snap=90° → rack runs along Y → scan slices along X
+    scan_axis = "Y" if snap_deg % 180 == 0 else "X"
+
+    return aligned, rot_deg, [cx, cy], scan_axis
 
 
 def load_cloud(path: str) -> np.ndarray:
@@ -108,8 +130,10 @@ def run_pipeline(
     pts_z = pts[mask]
     print(f"[pipeline] After Z filter ({zmin}–{zmax}m): {len(pts_z):,} pts", flush=True)
 
+    rot_deg    = 0.0
+    align_center = [float(pts_z[:, 0].mean()), float(pts_z[:, 1].mean())]
     if axis.lower() == "auto":
-        axis = detect_primary_axis(pts_z)
+        pts_z, rot_deg, align_center, axis = detect_and_align(pts_z)
 
     bounds = cloud_bounds(pts_z)
     ax_key_min = {"X": "xmin", "Y": "ymin"}[axis.upper()]
@@ -146,17 +170,31 @@ def run_pipeline(
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
+    cloud_bmin = [float(bounds["xmin"]), float(bounds["ymin"]), float(bounds["zmin"])]
+    cloud_bmax = [float(bounds["xmax"]), float(bounds["ymax"]), float(bounds["zmax"])]
+
+    # Prepend _CLOUD_META_ so GateDetector can restore the correct display rotation
+    meta_entry = {
+        "gate_id":      "_CLOUD_META_",
+        "plan_rotation": round(rot_deg, 2),
+        "align_center":  align_center,
+        "cloud_bmin":    cloud_bmin,
+        "cloud_bmax":    cloud_bmax,
+    }
+    gates_with_meta = [meta_entry] + all_gates
+
     result = {
-        "cloud_path": cloud_path,
-        "axis": axis.upper(),
-        "step_m": step_m,
-        "thickness_m": thickness_m,
-        "zmin": zmin,
-        "zmax": zmax,
-        "n_slices": int(len(positions)),
-        "n_gates": len(all_gates),
-        "elapsed_s": round(elapsed, 1),
-        "gates": all_gates,
+        "cloud_path":     cloud_path,
+        "axis":           axis.upper(),
+        "align_angle_deg": round(rot_deg, 2),
+        "step_m":         step_m,
+        "thickness_m":    thickness_m,
+        "zmin":           zmin,
+        "zmax":           zmax,
+        "n_slices":       int(len(positions)),
+        "n_gates":        len(all_gates),
+        "elapsed_s":      round(elapsed, 1),
+        "gates":          gates_with_meta,
     }
 
     ts = time.strftime("%Y%m%d%H%M")
