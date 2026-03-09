@@ -577,6 +577,20 @@ def run_pipeline(
             )
             pipe_circles = detect_pipe_circles(uv)
 
+            # Restrict circles to gate bounding boxes (+ 150 mm margin).
+            # Outside-gate detections are almost always false positives from
+            # structural members, flanges, and partial arcs of beams.
+            if gates and pipe_circles:
+                gate_bboxes = [g.to_dict()["bbox_2d"] for g in gates]
+                margin = 0.15
+                def _in_any_gate(pc, _bboxes=gate_bboxes, _m=margin):
+                    u, v = pc["u_m"], pc["v_m"]
+                    for u0, v0, u1, v1 in _bboxes:
+                        if u0 - _m <= u <= u1 + _m and v0 - _m <= v <= v1 + _m:
+                            return True
+                    return False
+                pipe_circles = [pc for pc in pipe_circles if _in_any_gate(pc)]
+
             if gates or pipe_circles:
                 if gates:
                     axis_gate_count += len(gates)
