@@ -146,8 +146,8 @@ def _load_e57(path: str) -> np.ndarray:
 def _make_plan_thumb_base(
     pts_z: np.ndarray,
     bounds: dict,
-    thumb_w: int = 340,
-    thumb_h: int = 700,
+    thumb_w: int = 680,
+    thumb_h: int = 1400,
 ) -> dict:
     """Pre-render the XY cloud scatter as a small plan thumbnail.
 
@@ -157,7 +157,7 @@ def _make_plan_thumb_base(
     """
     from PIL import Image
 
-    PAD = 20
+    PAD = 40
     x_min, x_max = bounds["xmin"], bounds["xmax"]
     y_min, y_max = bounds["ymin"], bounds["ymax"]
     x_range = max(x_max - x_min, 1e-6)
@@ -209,17 +209,17 @@ def _save_slice_image(
     """
     from PIL import Image, ImageDraw, ImageFont
 
-    W, H = 1200, 700
-    PAD = 40  # pixel padding around data
+    W, H = 2400, 1400
+    PAD = 80  # pixel padding around data
 
     fname = f"slice_{axis}_{pos:.2f}m.png"
     fpath = run_dir / fname
 
     # Subsample for speed
     uv_plot = uv
-    if len(uv) > 50_000:
+    if len(uv) > 100_000:
         rng = np.random.default_rng(0)
-        uv_plot = uv[rng.choice(len(uv), 50_000, replace=False)]
+        uv_plot = uv[rng.choice(len(uv), 100_000, replace=False)]
 
     # World → pixel transform (flip V so Z increases upward)
     u_min, v_min = uv_plot.min(axis=0)
@@ -241,9 +241,24 @@ def _save_slice_image(
     img = Image.fromarray(buf)
     draw = ImageDraw.Draw(img)
 
+    # Meter grid — faint lines at each whole-metre world coordinate
+    GRID_COL = (55, 55, 65)
+    u_start = int(np.floor(u_min))
+    v_start = int(np.floor(v_min))
+    u_end   = int(np.ceil(u_max)) + 1
+    v_end   = int(np.ceil(v_max)) + 1
+    for u_m in range(u_start, u_end):
+        px = int(PAD + (u_m - u_min) * scale)
+        if PAD <= px < W - PAD:
+            draw.line([(px, PAD), (px, H - PAD)], fill=GRID_COL, width=2)
+    for v_m in range(v_start, v_end):
+        py = int(H - PAD - (v_m - v_min) * scale)
+        if PAD <= py < H - PAD:
+            draw.line([(PAD, py), (W - PAD, py)], fill=GRID_COL, width=2)
+
     try:
-        font = ImageFont.truetype("C:/Windows/Fonts/consola.ttf", 13)
-        font_sm = ImageFont.truetype("C:/Windows/Fonts/consola.ttf", 11)
+        font = ImageFont.truetype("C:/Windows/Fonts/consola.ttf", 26)
+        font_sm = ImageFont.truetype("C:/Windows/Fonts/consola.ttf", 22)
     except Exception:
         font = ImageFont.load_default()
         font_sm = font
@@ -256,10 +271,10 @@ def _save_slice_image(
             continue
         draw.ellipse(
             [cx_px - r_px, cy_px - r_px, cx_px + r_px, cy_px + r_px],
-            outline=(0, 200, 220), width=1,
+            outline=(0, 200, 220), width=2,
         )
         lbl = f"{pc['nominal_in']}\""
-        draw.text((cx_px - r_px, cy_px - r_px - 13), lbl, fill=(0, 200, 220), font=font_sm)
+        draw.text((cx_px - r_px, cy_px - r_px - 26), lbl, fill=(0, 200, 220), font=font_sm)
 
     # Gate bounding boxes
     palette = [
@@ -272,16 +287,16 @@ def _save_slice_image(
         color = palette[ci % len(palette)]
         x0, y0 = to_px(u0, v0)
         x1, y1 = to_px(u1, v1)
-        draw.rectangle([x0, min(y0, y1), x1, max(y0, y1)], outline=color, width=2)
+        draw.rectangle([x0, min(y0, y1), x1, max(y0, y1)], outline=color, width=4)
         lbl = f"{d['gate_id']}  conf={d['confidence']:.2f}  {d['pipe_count']} pipes"
-        draw.text((x0 + 3, min(y0, y1) - 16), lbl, fill=color, font=font)
+        draw.text((x0 + 6, min(y0, y1) - 32), lbl, fill=color, font=font)
 
     # Axis labels
-    draw.text((W // 2 - 40, H - 18), f"{u_label} (m)", fill=(180, 180, 180), font=font)
-    draw.text((4, H // 2 - 30), f"{v_label}\n(m)", fill=(180, 180, 180), font=font)
+    draw.text((W // 2 - 80, H - 36), f"{u_label} (m)", fill=(180, 180, 180), font=font)
+    draw.text((8, H // 2 - 60), f"{v_label}\n(m)", fill=(180, 180, 180), font=font)
     title = (f"Slice {axis}={pos:.2f} m  —  {len(gates)} gate(s)"
              f"  {len(pipe_circles)} pipe(s)")
-    draw.text((PAD, 6), title, fill=(255, 255, 255), font=font)
+    draw.text((PAD, 12), title, fill=(255, 255, 255), font=font)
 
     # --- Plan thumbnail panel (left side) ---
     if plan_thumb is not None:
@@ -303,16 +318,16 @@ def _save_slice_image(
         if axis == "Y":
             _, py_line = to_tpx(tx_min, pos)
             if 0 <= py_line < th:
-                tdraw.line([(0, py_line), (tw, py_line)], fill=(200, 200, 60), width=1)
+                tdraw.line([(0, py_line), (tw, py_line)], fill=(200, 200, 60), width=2)
         else:  # X
             px_line, _ = to_tpx(pos, ty_min)
             if 0 <= px_line < tw:
-                tdraw.line([(px_line, 0), (px_line, th)], fill=(200, 200, 60), width=1)
+                tdraw.line([(px_line, 0), (px_line, th)], fill=(200, 200, 60), width=2)
 
         # Gate boxes on thumbnail
         COL_Y_T = (243, 156, 18)
         COL_X_T = (0, 210, 230)
-        MIN_TPX = 3
+        MIN_TPX = 6
         for g in gates:
             d = g.to_dict()
             b3 = d.get("bbox_3d", [])
@@ -331,15 +346,15 @@ def _save_slice_image(
             if ax == "X" and (lx1 - lx0) < MIN_TPX:
                 mid = (lx0 + lx1) // 2
                 lx0, lx1 = mid - MIN_TPX // 2, mid + MIN_TPX // 2
-            tdraw.rectangle([lx0, ly0, lx1, ly1], outline=col, width=2)
+            tdraw.rectangle([lx0, ly0, lx1, ly1], outline=col, width=4)
 
         # Separator + label
-        tdraw.line([(tw - 1, 0), (tw - 1, th)], fill=(60, 60, 80), width=2)
+        tdraw.line([(tw - 1, 0), (tw - 1, th)], fill=(60, 60, 80), width=4)
         try:
-            lbl_font = ImageFont.truetype("C:/Windows/Fonts/consola.ttf", 10)
+            lbl_font = ImageFont.truetype("C:/Windows/Fonts/consola.ttf", 20)
         except Exception:
             lbl_font = ImageFont.load_default()
-        tdraw.text((4, 4), "XY Plan", fill=(120, 120, 140), font=lbl_font)
+        tdraw.text((8, 8), "XY Plan", fill=(120, 120, 140), font=lbl_font)
 
         combined_h = max(th, H)
         combined = Image.new("RGB", (tw + W, combined_h), color=(26, 26, 26))
