@@ -569,10 +569,26 @@ def _propagate_pipe_detections(
     uv_cache  = {}   # (axis, adj_pos) → (uv, u_label, v_label) | None
     additions = {}   # (axis, adj_pos) → list of newly-found circles
 
-    for det in all_pipe_detections:
-        axis   = det["axis"]
-        pos    = det["position_m"]
-        known  = det["circles"]
+    n_total = len(all_pipe_detections)
+    print(f"[pipeline] Propagation: checking {n_total} source slice(s)…", flush=True)
+    t_prop  = time.time()
+    BAR_W   = 28
+
+    def _bar(done, total, new_found, elapsed):
+        frac   = done / max(total, 1)
+        filled = int(BAR_W * frac)
+        bar    = "=" * filled + (">" if filled < BAR_W else "=") + " " * max(0, BAR_W - filled - 1)
+        return (f"\r  [{bar}] {done}/{total}  "
+                f"new={new_found}  {elapsed:.0f}s  ")
+
+    for det_i, det in enumerate(all_pipe_detections):
+        axis  = det["axis"]
+        pos   = det["position_m"]
+        known = det["circles"]
+        sys.stdout.write(_bar(det_i + 1, n_total,
+                              sum(len(v) for v in additions.values()),
+                              time.time() - t_prop))
+        sys.stdout.flush()
         if not known:
             continue
 
@@ -626,6 +642,9 @@ def _propagate_pipe_detections(
                     if abs(fc["u_m"] - u_c) < 0.15 and abs(fc["v_m"] - v_c) < 0.15:
                         additions.setdefault(adj_key, []).append(fc)
                         break   # one match per known pipe
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
     if not additions:
         print(f"[pipeline] Propagation: no new circles found.", flush=True)
@@ -724,16 +743,29 @@ def run_pipeline(
 
         positions = np.arange(ax_min + step_m / 2, ax_max, step_m)
         n_slices_total += len(positions)
+        n_pos = len(positions)
         print(f"", flush=True)
-        print(f"[pipeline] ═══ {scan_axis}-axis scan  ({len(positions)} slices, "
+        print(f"[pipeline] ═══ {scan_axis}-axis scan  ({n_pos} slices, "
               f"{ax_min:.1f}–{ax_max:.1f} m, step={step_m}m) ═══", flush=True)
-        axis_gate_count = 0
+        axis_gate_count  = 0
+        axis_pipe_count  = 0
+        BAR_W = 28
+
+        def _scan_bar(done, gates_n, pipes_n, elapsed):
+            frac   = done / max(n_pos, 1)
+            filled = int(BAR_W * frac)
+            bar    = "=" * filled + (">" if filled < BAR_W else "=") + " " * max(0, BAR_W - filled - 1)
+            return (f"\r  {scan_axis}: [{bar}] {done}/{n_pos}  "
+                    f"gates={gates_n}  pipes={pipes_n}  {elapsed:.0f}s  ")
 
         for i, pos in enumerate(positions):
             _, uv, u_label, v_label = extract_slab(
                 pts_z, axis=scan_axis, position_m=float(pos), thickness_m=thickness_m,
             )
             if uv is None or len(uv) < 10:
+                sys.stdout.write(_scan_bar(i + 1, axis_gate_count, axis_pipe_count,
+                                           time.time() - t_start))
+                sys.stdout.flush()
                 continue
 
             gates, debug_str = detect_gates(
@@ -759,10 +791,13 @@ def run_pipeline(
             if gates or pipe_circles:
                 if gates:
                     axis_gate_count += len(gates)
-                    print(f"[pipeline]   {scan_axis}={pos:.1f}m → {len(gates)} gates, "
-                          f"{len(pipe_circles)} pipe(s) ({debug_str})", flush=True)
+                    sys.stdout.write(f"\n[pipeline]   {scan_axis}={pos:.1f}m → "
+                                     f"{len(gates)} gates, {len(pipe_circles)} pipe(s)"
+                                     f" ({debug_str})\n")
                 elif pipe_circles:
-                    print(f"[pipeline]   {scan_axis}={pos:.1f}m → {len(pipe_circles)} pipe(s) (no gates)", flush=True)
+                    sys.stdout.write(f"\n[pipeline]   {scan_axis}={pos:.1f}m → "
+                                     f"{len(pipe_circles)} pipe(s) (no gates)\n")
+                axis_pipe_count += len(pipe_circles)
                 img_fname = _save_slice_image(uv, gates, pipe_circles, float(pos),
                                               scan_axis, u_label, v_label, run_dir,
                                               plan_thumb=plan_thumb)
@@ -777,11 +812,13 @@ def run_pipeline(
                         "slice_image": img_fname,
                         "circles":     pipe_circles,
                     })
-            elif (i + 1) % 10 == 0:
-                elapsed = time.time() - t_start
-                pct = (i + 1) / len(positions) * 100
-                print(f"[pipeline]   {scan_axis} {pct:.0f}% ({i+1}/{len(positions)}) elapsed={elapsed:.0f}s", flush=True)
 
+            sys.stdout.write(_scan_bar(i + 1, axis_gate_count, axis_pipe_count,
+                                       time.time() - t_start))
+            sys.stdout.flush()
+
+        sys.stdout.write("\n")
+        sys.stdout.flush()
         print(f"[pipeline] ═══ {scan_axis}-axis done — {axis_gate_count} gates found ═══", flush=True)
 
     elapsed = time.time() - t_start
