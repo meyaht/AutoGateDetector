@@ -35,32 +35,39 @@ from gatedetector.slab import extract_slab, cloud_bounds
 
 
 def detect_and_align(pts: np.ndarray) -> tuple:
-    """Detect primary rack direction via longest-run, rotate cloud to align it to
-    the nearest cardinal axis, and return the aligned cloud + metadata.
+    """Detect primary rack direction and rotate cloud to align to nearest cardinal axis.
 
-    Scans angles 0–179° in 1° steps. For each angle, projects XY points onto
-    that direction, bins at 0.5 m, and counts the longest consecutive run of
-    occupied bins. The angle with the longest run is the rack's structural
-    direction. We snap to the nearest 90° multiple and rotate the cloud by the
-    small residual so slices are truly perpendicular to the structural members.
+    Two improvements over naive longest-run:
+    1. Z>0.5m filter for detection only — ground returns create long occupied
+       runs at many angles and confuse the detector; above-ground points are
+       dominated by the rack structure.
+    2. Aspect-ratio scoring: score = longest_run / perp_spread (p10–p90).
+       The rack is long AND narrow; scattered equipment and ground clutter
+       have a lower aspect ratio and will not win.
 
-    Returns (aligned_pts, rot_deg, [cx, cy], scan_axis) where rot_deg is the
-    rotation applied (stored as plan_rotation so GateDetector can display
-    the cloud in the same orientation).
+    Returns (aligned_pts, rot_deg, [cx, cy], scan_axis).
     """
-    n = min(200_000, len(pts))
+    # Strip ground returns for detection only — full cloud still used for scanning
+    detect_pts = pts[pts[:, 2] > 0.5]
+    if len(detect_pts) < 1000:
+        detect_pts = pts  # fallback for sparse elevated-only sets
+
+    n = min(200_000, len(detect_pts))
     rng = np.random.default_rng(42)
-    xy = pts[rng.choice(len(pts), n, replace=False), :2].astype(np.float64)
+    xy = detect_pts[rng.choice(len(detect_pts), n, replace=False), :2].astype(np.float64)
     c = xy.mean(axis=0)
     xy_c = xy - c
 
     bin_m = 0.5
     best_deg = 0
-    best_run = -1
+    best_score = -1.0
 
     for deg in range(180):
         rad = np.deg2rad(deg)
-        proj = xy_c[:, 0] * np.cos(rad) + xy_c[:, 1] * np.sin(rad)
+        cos_a, sin_a = np.cos(rad), np.sin(rad)
+
+        # Main axis projection → longest consecutive run of occupied bins
+        proj = xy_c[:, 0] * cos_a + xy_c[:, 1] * sin_a
         lo = proj.min()
         n_bins = max(1, int((proj.max() - lo) / bin_m) + 1)
         bins = np.clip(((proj - lo) / bin_m).astype(np.int32), 0, n_bins - 1)
@@ -71,16 +78,22 @@ def detect_and_align(pts: np.ndarray) -> tuple:
         starts = np.where(diff == 1)[0]
         ends   = np.where(diff == -1)[0]
         longest = int((ends - starts).max()) if len(starts) else 0
-        if longest > best_run:
-            best_run = longest
+
+        # Perpendicular spread (p10–p90) — narrow = good
+        perp = xy_c[:, 0] * (-sin_a) + xy_c[:, 1] * cos_a
+        perp_spread = max(float(np.percentile(perp, 90) - np.percentile(perp, 10)), 1.0)
+
+        score = longest / perp_spread
+        if score > best_score:
+            best_score = score
             best_deg = deg
 
     snap_deg = round(best_deg / 90) * 90
-    rot_deg  = float(snap_deg - best_deg)   # rotation to apply to align rack to cardinal
+    rot_deg  = float(snap_deg - best_deg)
 
     print(f"[pipeline] Axis detection: rack direction={best_deg}°, "
           f"snap={snap_deg}°, rotating by {rot_deg:+.1f}°  "
-          f"(run={best_run} bins × {bin_m}m)", flush=True)
+          f"(aspect score={best_score:.2f}, Z>0.5m pts={len(detect_pts):,})", flush=True)
 
     # Rotate entire cloud around its XY centroid
     r = np.deg2rad(rot_deg)
