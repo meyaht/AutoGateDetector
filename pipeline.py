@@ -145,8 +145,11 @@ def run_pipeline(
 
     rot_deg    = 0.0
     align_center = [float(pts_z[:, 0].mean()), float(pts_z[:, 1].mean())]
+    # Auto-alignment disabled — align cloud manually in CloudCompare before running
+    # if axis.lower() == "auto":
+    #     pts_z, rot_deg, align_center, axis = detect_and_align(pts_z)
     if axis.lower() == "auto":
-        pts_z, rot_deg, align_center, axis = detect_and_align(pts_z)
+        axis = "Y"  # default scan axis when alignment is disabled
 
     bounds = cloud_bounds(pts_z)
     ax_key_min = {"X": "xmin", "Y": "ymin"}[axis.upper()]
