@@ -11,6 +11,7 @@ Usage:
     --out results/  Output directory (default: results/)
     --launch        Open Streamlit viewer after detection (default: True)
     --no-launch     Skip Streamlit launch
+    --no-gd         Skip pushing results to GateDetector and launching it
 
 Imports detect logic from GateDetector so algorithm improvements apply automatically.
 """
@@ -52,6 +53,7 @@ def run_pipeline(
     zmax: float = 7.0,
     out_dir: str = "results",
     launch: bool = True,
+    launch_gd: bool = True,
 ) -> Path:
     pts = load_cloud(cloud_path)
 
@@ -109,14 +111,15 @@ def run_pipeline(
         "gates": all_gates,
     }
 
-    gates_json = out_path / "gates.json"
+    ts = time.strftime("%Y%m%d%H%M")
+    gates_json = out_path / f"{ts}_gates.json"
     with open(gates_json, "w") as f:
         json.dump(result, f, indent=2)
     print(f"[pipeline] Saved → {gates_json}", flush=True)
 
     # Also save CSV for quick inspection
     import csv
-    gates_csv = out_path / "gates.csv"
+    gates_csv = out_path / f"{ts}_gates.csv"
     if all_gates:
         cols = ["gate_id", "axis", "position_m", "confidence", "pipe_count",
                 "opening_area_m2", "bbox_2d"]
@@ -132,6 +135,9 @@ def run_pipeline(
     if launch:
         _launch_viewer(out_path)
 
+    if launch_gd:
+        _push_and_launch_gatedetector(gates_json)
+
     return gates_json
 
 
@@ -144,6 +150,20 @@ def _launch_viewer(out_dir: Path):
         [sys.executable, "-m", "streamlit", "run", str(viewer),
          "--server.port", "8053", "--server.headless", "false"],
         env=env,
+        cwd=str(Path(__file__).parent),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _push_and_launch_gatedetector(gates_json: Path):
+    gd_dir = _GATEDETECTOR
+    print(f"[pipeline] Launching GateDetector with {gates_json.name} ...", flush=True)
+    subprocess.Popen(
+        [sys.executable, str(gd_dir / "app.py"), str(gates_json)],
+        cwd=str(gd_dir),
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
     )
 
 
@@ -164,6 +184,8 @@ if __name__ == "__main__":
                         help="Output directory (default: results/)")
     parser.add_argument("--no-launch", action="store_true",
                         help="Skip Streamlit launch")
+    parser.add_argument("--no-gd", action="store_true",
+                        help="Skip pushing results to GateDetector")
     args = parser.parse_args()
 
     # Resolve out dir relative to this script
@@ -180,4 +202,5 @@ if __name__ == "__main__":
         zmax=args.zmax,
         out_dir=str(out_dir),
         launch=not args.no_launch,
+        launch_gd=not args.no_gd,
     )
