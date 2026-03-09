@@ -160,10 +160,9 @@ def _launch_viewer(out_dir: Path):
 def _push_and_launch_gatedetector(gates_json: Path):
     gd_dir = _GATEDETECTOR
     print(f"[pipeline] Launching GateDetector with {gates_json.name} ...", flush=True)
-    subprocess.Popen(
+    subprocess.call(
         [sys.executable, str(gd_dir / "app.py"), str(gates_json)],
         cwd=str(gd_dir),
-        creationflags=subprocess.CREATE_NEW_CONSOLE,
     )
 
 
