@@ -3,7 +3,7 @@
 Usage:
     python pipeline.py <cloud.npy> [options]
 
-    --axis X|Y      Slice axis (default: Y)
+    --axis X|Y|auto Slice axis — auto detects via longest-run (default: auto)
     --step 1.0      Step between slices in metres (default: 1.0)
     --thickness 0.3 Slab thickness in metres (default: 0.3)
     --zmin 0.0      Min Z to keep (default: 0.0)
@@ -34,6 +34,51 @@ from gatedetector.detect import detect_gates
 from gatedetector.slab import extract_slab, cloud_bounds
 
 
+def detect_primary_axis(pts: np.ndarray) -> str:
+    """Find primary rack axis (X or Y) using longest-run detection.
+
+    Projects XY points at angles 0–179° in 1° steps, bins at 0.5 m, and finds
+    the angle with the longest consecutive run of occupied bins. That angle is
+    the rack's structural direction. Returns 'X' if the rack runs along X
+    (scan slices perpendicular = along Y) or 'Y' if it runs along Y.
+    """
+    n = min(200_000, len(pts))
+    rng = np.random.default_rng(42)
+    xy = pts[rng.choice(len(pts), n, replace=False), :2].astype(np.float64)
+    c = xy.mean(axis=0)
+    xy_c = xy - c
+
+    bin_m = 0.5
+    best_deg = 0
+    best_run = -1
+
+    for deg in range(180):
+        rad = np.deg2rad(deg)
+        proj = xy_c[:, 0] * np.cos(rad) + xy_c[:, 1] * np.sin(rad)
+        lo = proj.min()
+        n_bins = max(1, int((proj.max() - lo) / bin_m) + 1)
+        bins = np.clip(((proj - lo) / bin_m).astype(np.int32), 0, n_bins - 1)
+        occ = np.zeros(n_bins, dtype=bool)
+        occ[bins] = True
+        padded = np.concatenate([[False], occ, [False]])
+        diff = np.diff(padded.astype(np.int8))
+        starts = np.where(diff == 1)[0]
+        ends   = np.where(diff == -1)[0]
+        longest = int((ends - starts).max()) if len(starts) else 0
+        if longest > best_run:
+            best_run = longest
+            best_deg = deg
+
+    # best_deg is the rack's long-axis direction.
+    # Scan slices must be perpendicular to the rack → slice axis is 90° from best_deg.
+    # If rack runs ~0° or ~180° (along X), slice along Y. If ~90° (along Y), slice along X.
+    perp_deg = (best_deg + 90) % 180
+    axis = "X" if perp_deg >= 45 and perp_deg < 135 else "Y"
+    print(f"[pipeline] Longest-run axis detection: rack direction={best_deg}°, "
+          f"scan axis={axis}  (run={best_run} bins × {bin_m}m)", flush=True)
+    return axis
+
+
 def load_cloud(path: str) -> np.ndarray:
     print(f"[pipeline] Loading {path} ...", flush=True)
     t0 = time.time()
@@ -46,7 +91,7 @@ def load_cloud(path: str) -> np.ndarray:
 
 def run_pipeline(
     cloud_path: str,
-    axis: str = "Y",
+    axis: str = "auto",
     step_m: float = 1.0,
     thickness_m: float = 0.3,
     zmin: float = 0.0,
@@ -62,6 +107,9 @@ def run_pipeline(
     mask = (pts[:, z_col] >= zmin) & (pts[:, z_col] <= zmax)
     pts_z = pts[mask]
     print(f"[pipeline] After Z filter ({zmin}–{zmax}m): {len(pts_z):,} pts", flush=True)
+
+    if axis.lower() == "auto":
+        axis = detect_primary_axis(pts_z)
 
     bounds = cloud_bounds(pts_z)
     ax_key_min = {"X": "xmin", "Y": "ymin"}[axis.upper()]
@@ -169,8 +217,8 @@ def _push_and_launch_gatedetector(gates_json: Path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AutoGateDetector — headless gate detection")
     parser.add_argument("cloud", help="Path to .npy point cloud")
-    parser.add_argument("--axis", default="Y", choices=["X", "Y"],
-                        help="Scan axis (default: Y)")
+    parser.add_argument("--axis", default="auto", choices=["X", "Y", "auto"],
+                        help="Scan axis — X, Y, or auto (default: auto)")
     parser.add_argument("--step", type=float, default=1.0,
                         help="Slice step in metres (default: 1.0)")
     parser.add_argument("--thickness", type=float, default=0.3,
