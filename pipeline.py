@@ -664,7 +664,9 @@ def _propagate_pipe_detections(
             continue
         uv_adj, u_lbl, v_lbl = cached
 
-        gate_objs  = [Gate.from_dict(g) for g in gate_map.get(adj_key, [])]
+        _GATE_EXTRA = {"slice_image"}
+        gate_objs  = [Gate.from_dict({k: v for k, v in g.items() if k not in _GATE_EXTRA})
+                      for g in gate_map.get(adj_key, [])]
         all_circles = pos_circles.get(adj_key, []) + new_circles
 
         img_fname = _save_slice_image(
