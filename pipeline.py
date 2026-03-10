@@ -751,8 +751,8 @@ def _struct_pass(
     bounds: dict,
     struct_thickness_m: float = 0.10,
     struct_step_m: float = 0.05,
-    min_h_span_frac: float = 0.45,
-    min_col_height_m: float = 0.75,
+    min_h_span_frac: float = 0.25,
+    min_col_height_m: float = 0.50,
     cluster_gap_m: float = 0.50,
 ) -> list[float]:
     """Thin-slice structural pre-pass: locate frame bent positions.
@@ -779,9 +779,11 @@ def _struct_pass(
           f"({n_pos} thin slices, {ax_min:.1f}–{ax_max:.1f} m, "
           f"thickness={struct_thickness_m}m, workers={n_workers}) ───", flush=True)
 
-    hits     = []
-    done_ctr = [0]
-    bar_lock = threading.Lock()
+    hits      = []
+    h_only    = [0]   # diagnostic: positions with h-band but no v-band
+    v_only    = [0]   # diagnostic: positions with v-band but no h-band
+    done_ctr  = [0]
+    bar_lock  = threading.Lock()
 
     def _check_pos(pos):
         _, uv, _, _ = extract_slab(
@@ -789,19 +791,23 @@ def _struct_pass(
             thickness_m=struct_thickness_m,
         )
         if uv is not None and len(uv) >= 20:
-            if (_has_full_width_hband(uv, min_span_frac=min_h_span_frac) and
-                    _has_tall_vband(uv, min_height_m=min_col_height_m)):
-                return float(pos)
-        return None
+            has_h = _has_full_width_hband(uv, min_span_frac=min_h_span_frac)
+            has_v = _has_tall_vband(uv, min_height_m=min_col_height_m)
+            return float(pos), has_h, has_v
+        return float(pos), False, False
 
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
         futures = {ex.submit(_check_pos, pos): pos for pos in positions}
         for fut in as_completed(futures):
-            result = fut.result()
+            pos, has_h, has_v = fut.result()
             with bar_lock:
                 done_ctr[0] += 1
-                if result is not None:
-                    hits.append(result)
+                if has_h and has_v:
+                    hits.append(pos)
+                elif has_h:
+                    h_only[0] += 1
+                elif has_v:
+                    v_only[0] += 1
                 frac   = done_ctr[0] / max(n_pos, 1)
                 filled = int(BAR_W * frac)
                 bar    = "=" * filled + (">" if filled < BAR_W else "=") + " " * max(0, BAR_W - filled - 1)
@@ -812,6 +818,8 @@ def _struct_pass(
     hits.sort()
     sys.stdout.write("\n")
     sys.stdout.flush()
+    print(f"[pipeline] ─── {scan_axis}-struct diagnostics: "
+          f"both={len(hits)}  h-only={h_only[0]}  v-only={v_only[0]} ───", flush=True)
 
     if not hits:
         print(f"[pipeline] ─── {scan_axis}-struct: no frames found ───", flush=True)
