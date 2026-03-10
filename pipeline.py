@@ -695,14 +695,17 @@ def _propagate_pipe_detections(
 
 
 def _has_structural_support(uv: np.ndarray, pc: dict,
-                            look_below_m: float = 0.30,
+                            look_below_m: float = 0.15,
                             min_pts: int = 10) -> bool:
     """Return True if there are enough points in a horizontal band just below
     the pipe bottom, indicating a structural support (beam / adjacent pipe row).
 
+    The beam sits at the lower quadrant of the pipe or just below it — focus
+    the search window tightly around the pipe bottom (default 150 mm window)
+    rather than a broad 300 mm zone that may catch unrelated structure.
+
     Pipes in a rack always rest on something.  A circle whose floor zone is
-    empty is almost certainly a false positive from a flange, column, or arc of
-    structural steel floating between beam rows.
+    empty is almost certainly a false positive floating between beam rows.
     """
     u_c, v_c, r_c = pc["u_m"], pc["v_m"], pc["radius_m"]
     mask = (
