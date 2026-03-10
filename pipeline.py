@@ -749,7 +749,7 @@ def _struct_pass(
     pts_z: np.ndarray,
     scan_axis: str,
     bounds: dict,
-    struct_thickness_m: float = 0.05,
+    struct_thickness_m: float = 0.10,
     struct_step_m: float = 0.05,
     min_h_span_frac: float = 0.60,
     min_col_height_m: float = 1.0,
