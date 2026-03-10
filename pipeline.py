@@ -7,7 +7,7 @@ Usage:
     --step 0.5      Step between slices in metres (default: 0.5)
     --thickness 0.5 Slab thickness in metres (default: 0.5)
     --zmin 0.0      Min Z to keep (default: 0.0)
-    --zmax 7.0      Max Z to keep (default: 7.0)
+    --zmax 2.0      Max Z to keep (default: 2.0)
     --out results/  Output directory (default: results/)
     --launch        Open Streamlit viewer after detection (default: True)
     --no-launch     Skip Streamlit launch
@@ -920,7 +920,7 @@ def run_pipeline(
     step_m: float = 0.5,
     thickness_m: float = 0.5,
     zmin: float = 0.0,
-    zmax: float = 7.0,
+    zmax: float = 2.0,
     out_dir: str = "results",
     launch: bool = True,
     launch_gd: bool = True,
@@ -1169,8 +1169,8 @@ if __name__ == "__main__":
                         help="Slab thickness in metres (default: 0.5)")
     parser.add_argument("--zmin", type=float, default=0.0,
                         help="Min Z to keep (default: 0.0)")
-    parser.add_argument("--zmax", type=float, default=7.0,
-                        help="Max Z to keep (default: 7.0)")
+    parser.add_argument("--zmax", type=float, default=2.0,
+                        help="Max Z to keep (default: 2.0)")
     parser.add_argument("--out", default="results",
                         help="Output directory (default: results/)")
     parser.add_argument("--no-launch", action="store_true",
