@@ -1,5 +1,10 @@
-"""Cloud Viewer — drop an NPY file path in and inspect the point cloud."""
+"""Cloud Viewer — inspect a .npy point cloud in the browser.
 
+Launch via CloudViewer.bat (drag and drop a .npy file onto it),
+or run directly: streamlit run cloud_viewer.py
+"""
+
+import os
 from pathlib import Path
 import numpy as np
 import streamlit as st
@@ -10,7 +15,9 @@ st.title("Cloud Viewer")
 
 MAX_PTS = 75_000
 
-path_str = st.text_input("NPY file path", placeholder=r"C:\path\to\cloud.npy")
+default_path = os.environ.get("CLOUD_FILE", "")
+path_str = st.text_input("NPY file path", value=default_path,
+                          placeholder=r"C:\path\to\cloud.npy")
 
 if not path_str:
     st.info("Enter the path to a .npy point cloud file.")
