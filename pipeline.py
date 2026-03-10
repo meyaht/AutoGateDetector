@@ -1029,6 +1029,34 @@ def run_pipeline(
                 uv, axis=scan_axis, position_m=float(pos), thickness_m=thickness_m,
                 pts3d=pts_z, verbose=False,
             )
+
+            # Struct pass confirmed this position is a real frame bent.
+            # If detect_gates found nothing, synthesise a gate spanning the
+            # full cross-section so the slice is still recorded.
+            if not gates:
+                u0f, v0f = float(uv[:, 0].min()), float(uv[:, 1].min())
+                u1f, v1f = float(uv[:, 0].max()), float(uv[:, 1].max())
+                bbox2 = [u0f, v0f, u1f, v1f]
+                ax_idx = {"X": 0, "Y": 1}[scan_axis]
+                u_idx  = {"X": 1, "Y": 0}[scan_axis]
+                b3 = [0.0] * 6
+                b3[ax_idx]     = float(pos) - thickness_m / 2
+                b3[ax_idx + 3] = float(pos) + thickness_m / 2
+                b3[u_idx]      = bbox2[0];  b3[u_idx + 3] = bbox2[2]
+                b3[2]          = bbox2[1];  b3[5]         = bbox2[3]
+                import uuid as _uuid
+                gates = [Gate(
+                    gate_id=f"GATE_{_uuid.uuid4().hex[:6].upper()}",
+                    axis=scan_axis,
+                    position_m=float(pos),
+                    thickness_m=thickness_m,
+                    bbox_2d=bbox2,
+                    bbox_3d=b3,
+                    opening_area_m2=(u1f - u0f) * (v1f - v0f),
+                    confidence=0.0,
+                    source="struct",
+                )]
+
             pipe_circles = detect_pipe_circles(uv)
 
             if gates and pipe_circles:
