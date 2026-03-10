@@ -694,6 +694,131 @@ def _propagate_pipe_detections(
     return updated
 
 
+def _has_full_width_hband(uv: np.ndarray,
+                          min_span_frac: float = 0.60,
+                          strip_h_m: float = 0.090) -> bool:
+    """Return True if any horizontal strip of points spans >= min_span_frac
+    of the total U width — indicating a structural beam chord crossing the slice.
+    Strip height is 3 × 30 mm cells by default.
+    """
+    if len(uv) < 20:
+        return False
+    u_min, v_min = uv.min(axis=0)
+    u_max, v_max = uv.max(axis=0)
+    u_range = u_max - u_min
+    if u_range < 1.0:
+        return False
+    n_strips = max(1, int((v_max - v_min) / strip_h_m))
+    v_edges  = np.linspace(v_min, v_max, n_strips + 1)
+    for i in range(n_strips):
+        mask = (uv[:, 1] >= v_edges[i]) & (uv[:, 1] < v_edges[i + 1])
+        if mask.sum() < 5:
+            continue
+        span = uv[mask, 0].max() - uv[mask, 0].min()
+        if span >= u_range * min_span_frac:
+            return True
+    return False
+
+
+def _has_tall_vband(uv: np.ndarray,
+                    min_height_m: float = 1.0,
+                    strip_w_m: float = 0.090) -> bool:
+    """Return True if any narrow vertical column of points spans >= min_height_m
+    — indicating a structural column crossing the slice.
+    Strip width is 3 × 30 mm cells by default.
+    """
+    if len(uv) < 10:
+        return False
+    u_min, v_min = uv.min(axis=0)
+    u_max, v_max = uv.max(axis=0)
+    n_strips = max(1, int((u_max - u_min) / strip_w_m))
+    u_edges  = np.linspace(u_min, u_max, n_strips + 1)
+    for i in range(n_strips):
+        mask = (uv[:, 0] >= u_edges[i]) & (uv[:, 0] < u_edges[i + 1])
+        if mask.sum() < 5:
+            continue
+        height = uv[mask, 1].max() - uv[mask, 1].min()
+        if height >= min_height_m:
+            return True
+    return False
+
+
+def _struct_pass(
+    pts_z: np.ndarray,
+    scan_axis: str,
+    bounds: dict,
+    struct_thickness_m: float = 0.05,
+    struct_step_m: float = 0.05,
+    min_h_span_frac: float = 0.60,
+    min_col_height_m: float = 1.0,
+    cluster_gap_m: float = 0.50,
+) -> list[float]:
+    """Thin-slice structural pre-pass: locate frame bent positions.
+
+    Scans at fine resolution (default 50 mm step, 50 mm thick) looking for
+    slices that contain BOTH:
+      • a full-width horizontal band  → beam chord spanning the rack
+      • a tall vertical band          → structural column
+
+    Cross-bracing and pipes are excluded: bracing spans only a tiny horizontal
+    fraction; pipes are thin rings that don't span the full width.
+
+    Nearby hits within cluster_gap_m are merged to one representative position
+    (the median of the cluster).  Returns a sorted list of bent positions.
+    """
+    ax_min = bounds[{"X": "xmin", "Y": "ymin"}[scan_axis]]
+    ax_max = bounds[{"X": "xmax", "Y": "ymax"}[scan_axis]]
+    positions = np.arange(ax_min + struct_step_m / 2, ax_max, struct_step_m)
+
+    n_pos = len(positions)
+    BAR_W = 28
+    print(f"[pipeline] ─── {scan_axis}-struct pre-pass  "
+          f"({n_pos} thin slices, {ax_min:.1f}–{ax_max:.1f} m, "
+          f"thickness={struct_thickness_m}m) ───", flush=True)
+
+    hits = []
+    for i, pos in enumerate(positions):
+        _, uv, _, _ = extract_slab(
+            pts_z, axis=scan_axis, position_m=float(pos),
+            thickness_m=struct_thickness_m,
+        )
+        if uv is None or len(uv) < 20:
+            pass
+        elif (_has_full_width_hband(uv, min_span_frac=min_h_span_frac) and
+              _has_tall_vband(uv, min_height_m=min_col_height_m)):
+            hits.append(float(pos))
+
+        frac   = (i + 1) / max(n_pos, 1)
+        filled = int(BAR_W * frac)
+        bar    = "=" * filled + (">" if filled < BAR_W else "=") + " " * max(0, BAR_W - filled - 1)
+        sys.stdout.write(f"\r  {scan_axis}-struct: [{bar}] {i+1}/{n_pos}  "
+                         f"frames={len(hits)}  ")
+        sys.stdout.flush()
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+    if not hits:
+        print(f"[pipeline] ─── {scan_axis}-struct: no frames found ───", flush=True)
+        return []
+
+    # Cluster nearby hits → one position per bent
+    clusters: list[list[float]] = []
+    group: list[float] = [hits[0]]
+    for p in hits[1:]:
+        if p - group[-1] <= cluster_gap_m:
+            group.append(p)
+        else:
+            clusters.append(group)
+            group = [p]
+    clusters.append(group)
+
+    bent_positions = [float(np.median(c)) for c in clusters]
+    print(f"[pipeline] ─── {scan_axis}-struct: {len(bent_positions)} frame bent(s) located ───",
+          flush=True)
+    return sorted(bent_positions)
+
+
 def _has_structural_support(uv: np.ndarray, pc: dict,
                             look_below_m: float = 0.15,
                             min_pts: int = 10) -> bool:
@@ -839,12 +964,21 @@ def run_pipeline(
         ax_min = bounds[ax_key_min]
         ax_max = bounds[ax_key_max]
 
-        positions = np.arange(ax_min + step_m / 2, ax_max, step_m)
+        # Structural pre-pass: locate frame bents, then only scan those positions
+        struct_positions = _struct_pass(pts_z, scan_axis, bounds)
+        if struct_positions:
+            positions = np.array(struct_positions)
+        else:
+            # Fallback: no frames found — scan everything as before
+            print(f"[pipeline] WARNING: struct pass found no frames on {scan_axis}, "
+                  f"falling back to full sweep.", flush=True)
+            positions = np.arange(ax_min + step_m / 2, ax_max, step_m)
+
         n_slices_total += len(positions)
         n_pos = len(positions)
         print(f"", flush=True)
-        print(f"[pipeline] ═══ {scan_axis}-axis scan  ({n_pos} slices, "
-              f"{ax_min:.1f}–{ax_max:.1f} m, step={step_m}m) ═══", flush=True)
+        print(f"[pipeline] ═══ {scan_axis}-axis scan  ({n_pos} slices at frame positions, "
+              f"{ax_min:.1f}–{ax_max:.1f} m) ═══", flush=True)
         axis_gate_count  = 0
         axis_pipe_count  = 0
         BAR_W = 28
