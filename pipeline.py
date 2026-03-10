@@ -751,8 +751,8 @@ def _struct_pass(
     bounds: dict,
     struct_thickness_m: float = 0.10,
     struct_step_m: float = 0.05,
-    min_h_span_frac: float = 0.60,
-    min_col_height_m: float = 1.0,
+    min_h_span_frac: float = 0.45,
+    min_col_height_m: float = 0.75,
     cluster_gap_m: float = 0.50,
 ) -> list[float]:
     """Thin-slice structural pre-pass: locate frame bent positions.
