@@ -21,7 +21,9 @@ import json
 import sys
 import os
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # Allow importing from GateDetector without installing it as a package
@@ -770,31 +772,44 @@ def _struct_pass(
     ax_max = bounds[{"X": "xmax", "Y": "ymax"}[scan_axis]]
     positions = np.arange(ax_min + struct_step_m / 2, ax_max, struct_step_m)
 
-    n_pos = len(positions)
-    BAR_W = 28
+    n_pos     = len(positions)
+    n_workers = max(1, (os.cpu_count() or 4) - 1)
+    BAR_W     = 28
     print(f"[pipeline] ─── {scan_axis}-struct pre-pass  "
           f"({n_pos} thin slices, {ax_min:.1f}–{ax_max:.1f} m, "
-          f"thickness={struct_thickness_m}m) ───", flush=True)
+          f"thickness={struct_thickness_m}m, workers={n_workers}) ───", flush=True)
 
-    hits = []
-    for i, pos in enumerate(positions):
+    hits     = []
+    done_ctr = [0]
+    bar_lock = threading.Lock()
+
+    def _check_pos(pos):
         _, uv, _, _ = extract_slab(
             pts_z, axis=scan_axis, position_m=float(pos),
             thickness_m=struct_thickness_m,
         )
-        if uv is None or len(uv) < 20:
-            pass
-        elif (_has_full_width_hband(uv, min_span_frac=min_h_span_frac) and
-              _has_tall_vband(uv, min_height_m=min_col_height_m)):
-            hits.append(float(pos))
+        if uv is not None and len(uv) >= 20:
+            if (_has_full_width_hband(uv, min_span_frac=min_h_span_frac) and
+                    _has_tall_vband(uv, min_height_m=min_col_height_m)):
+                return float(pos)
+        return None
 
-        frac   = (i + 1) / max(n_pos, 1)
-        filled = int(BAR_W * frac)
-        bar    = "=" * filled + (">" if filled < BAR_W else "=") + " " * max(0, BAR_W - filled - 1)
-        sys.stdout.write(f"\r  {scan_axis}-struct: [{bar}] {i+1}/{n_pos}  "
-                         f"frames={len(hits)}  ")
-        sys.stdout.flush()
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futures = {ex.submit(_check_pos, pos): pos for pos in positions}
+        for fut in as_completed(futures):
+            result = fut.result()
+            with bar_lock:
+                done_ctr[0] += 1
+                if result is not None:
+                    hits.append(result)
+                frac   = done_ctr[0] / max(n_pos, 1)
+                filled = int(BAR_W * frac)
+                bar    = "=" * filled + (">" if filled < BAR_W else "=") + " " * max(0, BAR_W - filled - 1)
+                sys.stdout.write(f"\r  {scan_axis}-struct: [{bar}] {done_ctr[0]}/{n_pos}  "
+                                 f"frames={len(hits)}  ")
+                sys.stdout.flush()
 
+    hits.sort()
     sys.stdout.write("\n")
     sys.stdout.flush()
 
@@ -982,6 +997,10 @@ def run_pipeline(
         axis_gate_count  = 0
         axis_pipe_count  = 0
         BAR_W = 28
+        bar_lock = threading.Lock()
+        done_count = [0]
+        axis_gate_count_arr = [0]
+        axis_pipe_count_arr = [0]
 
         def _scan_bar(done, gates_n, pipes_n, elapsed):
             frac   = done / max(n_pos, 1)
@@ -990,25 +1009,20 @@ def run_pipeline(
             return (f"\r  {scan_axis}: [{bar}] {done}/{n_pos}  "
                     f"gates={gates_n}  pipes={pipes_n}  {elapsed:.0f}s  ")
 
-        for i, pos in enumerate(positions):
+        def _scan_worker(pos):
             _, uv, u_label, v_label = extract_slab(
                 pts_z, axis=scan_axis, position_m=float(pos), thickness_m=thickness_m,
             )
             if uv is None or len(uv) < 10:
-                sys.stdout.write(_scan_bar(i + 1, axis_gate_count, axis_pipe_count,
-                                           time.time() - t_start))
-                sys.stdout.flush()
-                continue
+                return {"pos": float(pos), "gates": [], "pipe_circles": [],
+                        "img_fname": None, "u_label": u_label, "v_label": v_label}
 
-            gates, debug_str = detect_gates(
+            gates, _ = detect_gates(
                 uv, axis=scan_axis, position_m=float(pos), thickness_m=thickness_m,
                 pts3d=pts_z, verbose=False,
             )
             pipe_circles = detect_pipe_circles(uv)
 
-            # Restrict circles to gate bounding boxes (+ 150 mm margin).
-            # Outside-gate detections are almost always false positives from
-            # structural members, flanges, and partial arcs of beams.
             if gates and pipe_circles:
                 gate_bboxes = [g.to_dict()["bbox_2d"] for g in gates]
                 margin = 0.15
@@ -1020,42 +1034,61 @@ def run_pipeline(
                     return False
                 pipe_circles = [pc for pc in pipe_circles if _in_any_gate(pc)]
 
-            # Drop circles with no structural support below them — pipes always
-            # rest on something; floating circles between beam rows are noise.
             if pipe_circles:
                 pipe_circles = [pc for pc in pipe_circles
                                 if _has_structural_support(uv, pc)]
 
-            # Targeted search along gate bottom beams for densely-packed pipes
-            # resting on the bottom chord (upper-arc-only visibility).
             if gates:
                 bottom_extras = _bottom_beam_pipe_search(uv, gates, pipe_circles)
                 pipe_circles = pipe_circles + bottom_extras
 
+            img_fname = None
             if gates or pipe_circles:
-                if gates:
-                    axis_gate_count += len(gates)
-                    sys.stdout.write(f"\n[pipeline]   {scan_axis}={pos:.1f}m → "
-                                     f"{len(gates)} gates, {len(pipe_circles)} pipe(s)\n")
-                axis_pipe_count += len(pipe_circles)
                 img_fname = _save_slice_image(uv, gates, pipe_circles, float(pos),
                                               scan_axis, u_label, v_label, run_dir,
                                               plan_thumb=plan_thumb)
-                for g in gates:
+
+            return {"pos": float(pos), "gates": gates, "pipe_circles": pipe_circles,
+                    "img_fname": img_fname, "u_label": u_label, "v_label": v_label}
+
+        n_workers = max(1, (os.cpu_count() or 4) - 1)
+        scan_results = {}
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            future_map = {executor.submit(_scan_worker, pos): pos for pos in positions}
+            for future in as_completed(future_map):
+                result = future.result()
+                scan_results[result["pos"]] = result
+                with bar_lock:
+                    done_count[0] += 1
+                    if result["gates"]:
+                        axis_gate_count_arr[0] += len(result["gates"])
+                        sys.stdout.write(
+                            f"\n[pipeline]   {scan_axis}={result['pos']:.1f}m → "
+                            f"{len(result['gates'])} gates, {len(result['pipe_circles'])} pipe(s)\n"
+                        )
+                    axis_pipe_count_arr[0] += len(result["pipe_circles"])
+                    sys.stdout.write(_scan_bar(done_count[0], axis_gate_count_arr[0],
+                                               axis_pipe_count_arr[0], time.time() - t_start))
+                    sys.stdout.flush()
+
+        axis_gate_count = axis_gate_count_arr[0]
+        axis_pipe_count = axis_pipe_count_arr[0]
+
+        # Merge results in position order
+        for pos in sorted(scan_results.keys()):
+            r = scan_results[pos]
+            if r["gates"] or r["pipe_circles"]:
+                for g in r["gates"]:
                     d = g.to_dict()
-                    d["slice_image"] = img_fname
+                    d["slice_image"] = r["img_fname"]
                     all_gates.append(d)
-                if pipe_circles:
+                if r["pipe_circles"]:
                     all_pipe_detections.append({
                         "axis":        scan_axis,
-                        "position_m":  float(pos),
-                        "slice_image": img_fname,
-                        "circles":     pipe_circles,
+                        "position_m":  pos,
+                        "slice_image": r["img_fname"],
+                        "circles":     r["pipe_circles"],
                     })
-
-            sys.stdout.write(_scan_bar(i + 1, axis_gate_count, axis_pipe_count,
-                                       time.time() - t_start))
-            sys.stdout.flush()
 
         sys.stdout.write("\n")
         sys.stdout.flush()
