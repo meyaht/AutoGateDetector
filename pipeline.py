@@ -30,6 +30,7 @@ if str(_GATEDETECTOR) not in sys.path:
     sys.path.insert(0, str(_GATEDETECTOR))
 
 import numpy as np
+from scipy.signal import find_peaks
 from gatedetector.detect import detect_gates, detect_pipe_circles, Gate
 from gatedetector.slab import extract_slab, cloud_bounds
 
@@ -693,6 +694,98 @@ def _propagate_pipe_detections(
     return updated
 
 
+def _has_structural_support(uv: np.ndarray, pc: dict,
+                            look_below_m: float = 0.30,
+                            min_pts: int = 10) -> bool:
+    """Return True if there are enough points in a horizontal band just below
+    the pipe bottom, indicating a structural support (beam / adjacent pipe row).
+
+    Pipes in a rack always rest on something.  A circle whose floor zone is
+    empty is almost certainly a false positive from a flange, column, or arc of
+    structural steel floating between beam rows.
+    """
+    u_c, v_c, r_c = pc["u_m"], pc["v_m"], pc["radius_m"]
+    mask = (
+        (uv[:, 0] >= u_c - r_c - 0.10) & (uv[:, 0] <= u_c + r_c + 0.10) &
+        (uv[:, 1] >= v_c - r_c - look_below_m) & (uv[:, 1] <= v_c - r_c + 0.05)
+    )
+    return int(mask.sum()) >= min_pts
+
+
+def _bottom_beam_pipe_search(
+    uv: np.ndarray,
+    gates: list,
+    existing_circles: list,
+) -> list:
+    """Targeted pipe search along the bottom beam of each gate.
+
+    Pipes resting on the bottom chord have their lower arc buried against the
+    beam; only the upper ~150° is visible.  When many pipes are packed side by
+    side the standard connected-component fit merges them into one blob.
+
+    Strategy:
+      1. Restrict to a vertical band just above the gate bottom (v0 → v0+0.6 m).
+      2. Build a 1D histogram along the horizontal axis to locate individual pipe
+         columns as peaks — each peak is a candidate pipe centre.
+      3. For each peak, extract a narrow column of points and attempt a circle
+         fit with relaxed thresholds (arc ≥ 130°).
+    """
+    new_circles = []
+    already = {(round(pc["u_m"], 2), round(pc["v_m"], 2)) for pc in existing_circles}
+
+    for g in gates:
+        u0, v0, u1, v1 = g.to_dict()["bbox_2d"]
+
+        # Bottom-beam zone: 50 mm below v0 to 600 mm above it
+        bz_mask = (
+            (uv[:, 0] >= u0 - 0.10) & (uv[:, 0] <= u1 + 0.10) &
+            (uv[:, 1] >= v0 - 0.05) & (uv[:, 1] <= v0 + 0.60)
+        )
+        uv_zone = uv[bz_mask]
+        if len(uv_zone) < 20:
+            continue
+
+        # 1D histogram along horizontal axis — 20 mm bins
+        bin_w = 0.020
+        bins = np.arange(u0 - 0.10, u1 + 0.10 + bin_w, bin_w)
+        hist, edges = np.histogram(uv_zone[:, 0], bins=bins)
+
+        # Peaks separated by at least 60 mm (smallest pipe OD = 60 mm)
+        min_sep = max(1, int(0.060 / bin_w))
+        peaks, _ = find_peaks(hist, distance=min_sep, height=4)
+
+        for pi in peaks:
+            u_peak = float((edges[pi] + edges[pi + 1]) / 2)
+
+            # Skip if already have a circle near this horizontal position
+            if any(abs(u_peak - pc["u_m"]) < 0.10
+                   for pc in existing_circles + new_circles):
+                continue
+
+            # Extract narrow column around peak, tall enough for any pipe size
+            col_mask = (
+                (uv[:, 0] >= u_peak - 0.25) & (uv[:, 0] <= u_peak + 0.25) &
+                (uv[:, 1] >= v0 - 0.05)     & (uv[:, 1] <= v0 + 0.55)
+            )
+            nearby = uv[col_mask]
+            if len(nearby) < 6:
+                continue
+
+            # Relaxed arc: upper half only (pipe resting on beam)
+            candidates = detect_pipe_circles(
+                nearby, min_inlier_frac=0.40, min_arc_deg=130.0,
+            )
+            for c in candidates:
+                key = (round(c["u_m"], 2), round(c["v_m"], 2))
+                if key not in already and u0 - 0.15 <= c["u_m"] <= u1 + 0.15:
+                    if _has_structural_support(uv, c):
+                        new_circles.append(c)
+                        already.add(key)
+                        break   # one pipe per peak
+
+    return new_circles
+
+
 def run_pipeline(
     cloud_path: str,
     axis: str = "auto",
@@ -789,6 +882,18 @@ def run_pipeline(
                             return True
                     return False
                 pipe_circles = [pc for pc in pipe_circles if _in_any_gate(pc)]
+
+            # Drop circles with no structural support below them — pipes always
+            # rest on something; floating circles between beam rows are noise.
+            if pipe_circles:
+                pipe_circles = [pc for pc in pipe_circles
+                                if _has_structural_support(uv, pc)]
+
+            # Targeted search along gate bottom beams for densely-packed pipes
+            # resting on the bottom chord (upper-arc-only visibility).
+            if gates:
+                bottom_extras = _bottom_beam_pipe_search(uv, gates, pipe_circles)
+                pipe_circles = pipe_circles + bottom_extras
 
             if gates or pipe_circles:
                 if gates:
