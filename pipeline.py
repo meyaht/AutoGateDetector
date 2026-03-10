@@ -1139,7 +1139,7 @@ def run_pipeline(
     )
 
     # Generate plan view image
-    plan_fname = _save_plan_image(pts_z, all_gates, run_dir)
+    plan_fname = _save_plan_image(pts, all_gates, run_dir)
 
     out_path = run_dir
 
