@@ -6,8 +6,8 @@ Usage:
     --axis X|Y|both|auto  Slice axis — X, Y, both (scans XZ and YZ), or auto (default: auto=Y)
     --step 0.5      Step between slices in metres (default: 0.5)
     --thickness 0.5 Slab thickness in metres (default: 0.5)
-    --zmin 0.0      Min Z to keep (default: 0.0)
-    --zmax 2.0      Max Z to keep (default: 2.0)
+    --zmin 1.5      Min Z to keep (default: 1.5)
+    --zmax 15.0     Max Z to keep (default: 15.0)
     --out results/  Output directory (default: results/)
     --launch        Open Streamlit viewer after detection (default: True)
     --no-launch     Skip Streamlit launch
@@ -942,8 +942,8 @@ def run_pipeline(
     axis: str = "auto",
     step_m: float = 0.5,
     thickness_m: float = 0.5,
-    zmin: float = 0.0,
-    zmax: float = 2.0,
+    zmin: float = 1.5,
+    zmax: float = 15.0,
     out_dir: str = "results",
     launch: bool = True,
     launch_gd: bool = True,
@@ -1236,10 +1236,10 @@ if __name__ == "__main__":
                         help="Slice step in metres (default: 0.5)")
     parser.add_argument("--thickness", type=float, default=0.5,
                         help="Slab thickness in metres (default: 0.5)")
-    parser.add_argument("--zmin", type=float, default=0.0,
-                        help="Min Z to keep (default: 0.0)")
-    parser.add_argument("--zmax", type=float, default=2.0,
-                        help="Max Z to keep (default: 2.0)")
+    parser.add_argument("--zmin", type=float, default=1.5,
+                        help="Min Z to keep (default: 1.5)")
+    parser.add_argument("--zmax", type=float, default=15.0,
+                        help="Max Z to keep (default: 15.0)")
     parser.add_argument("--out", default="results",
                         help="Output directory (default: results/)")
     parser.add_argument("--no-launch", action="store_true",
